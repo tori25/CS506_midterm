@@ -1,52 +1,146 @@
-import pandas as pd
-from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction import text
+from scipy.sparse import hstack, csr_matrix
+import pandas as pd
+import numpy as np
 
 
-def prepare_training_data(training_df, text_column="Text", max_features=10000, ngram_range=(1, 2)):
-    dataset = training_df.dropna(subset=["Score"]).copy()
+def build_bias_features(train_labeled, all_data):
+    """
+    Compute user-level and product-level average scores from labeled training rows.
+    Returns a DataFrame of bias features indexed by the same index as all_data.
+    """
+    user_stats = (
+        train_labeled.groupby("UserId")["Score"]
+        .agg(user_mean_score="mean", user_review_count="count")
+        .reset_index()
+    )
+    product_stats = (
+        train_labeled.groupby("ProductId")["Score"]
+        .agg(product_mean_score="mean", product_review_count="count")
+        .reset_index()
+    )
 
-    # target
-    y = dataset["Score"]
+    global_mean = train_labeled["Score"].mean()
 
-    # numeric features
-    X_num = dataset.drop(columns=["Score"]).select_dtypes(include=["number"]).copy()
-    X_num = X_num.fillna(0)
+    df = all_data[["UserId", "ProductId"]].copy()
+    df = df.merge(user_stats, on="UserId", how="left")
+    df = df.merge(product_stats, on="ProductId", how="left")
 
-    # text feature
-    if text_column not in dataset.columns:
-        raise ValueError(f"Column '{text_column}' not found in training data.")
+    df["user_mean_score"] = df["user_mean_score"].fillna(global_mean)
+    df["user_review_count"] = df["user_review_count"].fillna(0)
+    df["product_mean_score"] = df["product_mean_score"].fillna(global_mean)
+    df["product_review_count"] = df["product_review_count"].fillna(0)
 
-    text_data = dataset[text_column].fillna("").astype(str)
+    # Difference between user average and global average (user bias)
+    df["user_bias"] = df["user_mean_score"] - global_mean
+    df["product_bias"] = df["product_mean_score"] - global_mean
+
+    return df[["user_mean_score", "user_review_count", "product_mean_score",
+               "product_review_count", "user_bias", "product_bias"]].values
+
+
+def build_numeric_features(df):
+    X = pd.DataFrame(index=df.index)
+
+    X["HelpfulnessRatio"] = (
+        df["HelpfulnessNumerator"] / (df["HelpfulnessDenominator"] + 1)
+    )
+    X["HelpfulnessDenominator"] = df["HelpfulnessDenominator"].fillna(0)
+    X["HelpfulnessNumerator"] = df["HelpfulnessNumerator"].fillna(0)
+
+    text_col = df["Text"].fillna("")
+    summary_col = df["Summary"].fillna("")
+
+    X["TextLength"] = text_col.apply(len)
+    X["SummaryLength"] = summary_col.apply(len)
+    X["TextWordCount"] = text_col.apply(lambda x: len(x.split()))
+    X["SummaryWordCount"] = summary_col.apply(lambda x: len(x.split()))
+
+    X["NumExclamation"] = text_col.apply(lambda x: x.count("!"))
+    X["NumQuestion"] = text_col.apply(lambda x: x.count("?"))
+    X["UppercaseRatio"] = text_col.apply(
+        lambda x: sum(1 for c in x if c.isupper()) / (len(x) + 1)
+    )
+    X["UniqueWordRatio"] = text_col.apply(
+        lambda x: len(set(x.lower().split())) / (len(x.split()) + 1)
+    )
+    X["AvgWordLength"] = text_col.apply(
+        lambda x: np.mean([len(w) for w in x.split()]) if x.split() else 0
+    )
+
+    dt = pd.to_datetime(df["Time"], unit="s", errors="coerce")
+    X["Year"] = dt.dt.year.fillna(0)
+    X["Month"] = dt.dt.month.fillna(0)
+
+    return X.fillna(0)
+
+
+def prepare_training_data(training_df, text_column="Text", max_features=30000, ngram_range=(1, 2)):
+    # Labeled = has Score; unlabeled = test set
+    labeled = training_df.dropna(subset=["Score"]).copy()
+
+    y = labeled["Score"].values
+
+    # Bias features (fit only on labeled, applied to labeled)
+    bias = build_bias_features(labeled, labeled)
+
+    # Numeric features
+    num_feats = build_numeric_features(labeled)
+    numeric_columns = num_feats.columns.tolist()
+
+    # Custom stopwords
+    movie_stop = {
+        "movie", "film", "watch", "watched", "one", "really",
+        "also", "even", "get", "got", "make", "made"
+    }
+    stop_words = list(text.ENGLISH_STOP_WORDS.union(movie_stop))
+
+    # TF-IDF on combined Summary + Text
+    combined_text = (
+        labeled["Summary"].fillna("").astype(str) + " " +
+        labeled["Text"].fillna("").astype(str)
+    )
 
     tfidf = TfidfVectorizer(
-        max_features=max_features,
+        lowercase=True,
+        stop_words=stop_words,
         ngram_range=ngram_range,
-        stop_words="english"
+        min_df=3,
+        max_df=0.9,
+        sublinear_tf=True,
+        norm="l2",
+        smooth_idf=True,
+        use_idf=True,
+        max_features=max_features
     )
-    X_text = tfidf.fit_transform(text_data)
 
-    # combine numeric + text
-    X_num_sparse = csr_matrix(X_num.values)
-    X = hstack([X_num_sparse, X_text])
+    X_text = tfidf.fit_transform(combined_text)
+    print("TF-IDF matrix shape:", X_text.shape)
 
-    return X, y, tfidf, X_num.columns.tolist()
+    X_num_sparse = csr_matrix(num_feats.values)
+    X_bias_sparse = csr_matrix(bias)
+    X = hstack([X_num_sparse, X_bias_sparse, X_text])
+
+    return X, y, tfidf, numeric_columns, labeled
 
 
-def prepare_test_data(test_df, tfidf, numeric_columns, text_column="Text"):
-    # numeric features
-    X_num = test_df.reindex(columns=numeric_columns, fill_value=0).copy()
-    X_num = X_num.fillna(0)
+def prepare_test_data(test_df, tfidf, numeric_columns, labeled_df, text_column="Text"):
+    # Bias features: compute from labeled data, apply to test
+    bias = build_bias_features(labeled_df, test_df)
 
-    # text feature
-    if text_column not in test_df.columns:
-        raise ValueError(f"Column '{text_column}' not found in test data.")
+    # Numeric features
+    num_feats = build_numeric_features(test_df)
+    num_feats = num_feats.reindex(columns=numeric_columns, fill_value=0).fillna(0)
 
-    text_data = test_df[text_column].fillna("").astype(str)
-    X_text = tfidf.transform(text_data)
+    combined_text = (
+        test_df["Summary"].fillna("").astype(str) + " " +
+        test_df["Text"].fillna("").astype(str)
+    )
+    X_text = tfidf.transform(combined_text)
 
-    # combine numeric + text
-    X_num_sparse = csr_matrix(X_num.values)
-    X_test = hstack([X_num_sparse, X_text])
+    X_num_sparse = csr_matrix(num_feats.values)
+    X_bias_sparse = csr_matrix(bias)
+    X_test = hstack([X_num_sparse, X_bias_sparse, X_text])
 
     return X_test
