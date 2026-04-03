@@ -5,6 +5,27 @@ from sklearn.preprocessing import Normalizer
 from scipy.sparse import hstack, csr_matrix
 import pandas as pd
 import numpy as np
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+_sia = SentimentIntensityAnalyzer()
+
+
+def build_sentiment_features(df):
+    """VADER sentiment scores on Summary and Text columns."""
+    summaries = df["Summary"].fillna("").astype(str)
+    texts = df["Text"].fillna("").astype(str)
+
+    summary_scores = summaries.apply(_sia.polarity_scores)
+    text_scores = texts.apply(_sia.polarity_scores)
+
+    result = pd.DataFrame(index=df.index)
+    result["summary_vader_compound"] = summary_scores.apply(lambda s: s["compound"])
+    result["summary_vader_pos"]      = summary_scores.apply(lambda s: s["pos"])
+    result["summary_vader_neg"]      = summary_scores.apply(lambda s: s["neg"])
+    result["text_vader_compound"]    = text_scores.apply(lambda s: s["compound"])
+    result["text_vader_pos"]         = text_scores.apply(lambda s: s["pos"])
+    result["text_vader_neg"]         = text_scores.apply(lambda s: s["neg"])
+    return result
 
 
 def build_bias_features(train_labeled, all_data, shrinkage=10):
@@ -103,6 +124,11 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
 
     # Numeric features
     num_feats = build_numeric_features(labeled)
+
+    # Sentiment features
+    sentiment = build_sentiment_features(labeled)
+    num_feats = pd.concat([num_feats, sentiment], axis=1)
+
     numeric_columns = num_feats.columns.tolist()
 
     # Custom stopwords
@@ -154,6 +180,8 @@ def prepare_test_data(test_df, tfidf, svd, numeric_columns, labeled_df, text_col
 
     # Numeric features
     num_feats = build_numeric_features(test_df)
+    sentiment = build_sentiment_features(test_df)
+    num_feats = pd.concat([num_feats, sentiment], axis=1)
     num_feats = num_feats.reindex(columns=numeric_columns, fill_value=0).fillna(0)
 
     combined_text = (
