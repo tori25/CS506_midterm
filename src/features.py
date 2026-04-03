@@ -38,14 +38,19 @@ def build_bias_features(train_labeled, all_data, shrinkage=10):
 
     user_stats = (
         train_labeled.groupby("UserId")["Score"]
-        .agg(user_raw_mean="mean", user_review_count="count")
+        .agg(user_raw_mean="mean", user_review_count="count", user_score_std="std")
         .reset_index()
     )
     product_stats = (
         train_labeled.groupby("ProductId")["Score"]
-        .agg(product_raw_mean="mean", product_review_count="count")
+        .agg(product_raw_mean="mean", product_review_count="count", product_score_std="std")
         .reset_index()
     )
+
+    # std is NaN for single-review users/products — fill with global std
+    global_std = train_labeled["Score"].std()
+    user_stats["user_score_std"] = user_stats["user_score_std"].fillna(global_std)
+    product_stats["product_score_std"] = product_stats["product_score_std"].fillna(global_std)
 
     # Smoothed means
     user_stats["user_mean_score"] = (
@@ -58,23 +63,87 @@ def build_bias_features(train_labeled, all_data, shrinkage=10):
     )
 
     df = all_data[["UserId", "ProductId"]].copy()
-    df = df.merge(user_stats[["UserId", "user_mean_score", "user_review_count"]], on="UserId", how="left")
-    df = df.merge(product_stats[["ProductId", "product_mean_score", "product_review_count"]], on="ProductId", how="left")
+    df = df.merge(
+        user_stats[["UserId", "user_mean_score", "user_review_count", "user_score_std"]],
+        on="UserId", how="left"
+    )
+    df = df.merge(
+        product_stats[["ProductId", "product_mean_score", "product_review_count", "product_score_std"]],
+        on="ProductId", how="left"
+    )
 
-    df["user_mean_score"] = df["user_mean_score"].fillna(global_mean)
-    df["user_review_count"] = df["user_review_count"].fillna(0)
-    df["product_mean_score"] = df["product_mean_score"].fillna(global_mean)
+    df["user_mean_score"]      = df["user_mean_score"].fillna(global_mean)
+    df["user_review_count"]    = df["user_review_count"].fillna(0)
+    df["user_score_std"]       = df["user_score_std"].fillna(global_std)
+    df["product_mean_score"]   = df["product_mean_score"].fillna(global_mean)
     df["product_review_count"] = df["product_review_count"].fillna(0)
+    df["product_score_std"]    = df["product_score_std"].fillna(global_std)
 
-    df["user_bias"] = df["user_mean_score"] - global_mean
-    df["product_bias"] = df["product_mean_score"] - global_mean
-
-    # Combined bias signal
+    df["user_bias"]         = df["user_mean_score"] - global_mean
+    df["product_bias"]      = df["product_mean_score"] - global_mean
     df["user_product_bias"] = df["user_bias"] + df["product_bias"]
 
-    return df[["user_mean_score", "user_review_count", "product_mean_score",
-               "product_review_count", "user_bias", "product_bias",
-               "user_product_bias"]].values
+    return df[["user_mean_score", "user_review_count", "user_score_std",
+               "product_mean_score", "product_review_count", "product_score_std",
+               "user_bias", "product_bias", "user_product_bias"]].values
+
+
+def build_bias_features_loo(train_labeled, shrinkage=10):
+    """
+    Leave-one-out bias features for training data only.
+    Each sample's user/product mean is computed WITHOUT that sample's score,
+    eliminating target leakage when training tree models.
+    """
+    global_mean = train_labeled["Score"].mean()
+    global_std  = train_labeled["Score"].std()
+
+    # Per-user aggregates across the whole training fold
+    user_agg = train_labeled.groupby("UserId")["Score"].agg(["sum", "count", "std"]).rename(
+        columns={"sum": "u_sum", "count": "u_count", "std": "u_std"}
+    )
+    product_agg = train_labeled.groupby("ProductId")["Score"].agg(["sum", "count", "std"]).rename(
+        columns={"sum": "p_sum", "count": "p_count", "std": "p_std"}
+    )
+
+    df = train_labeled[["UserId", "ProductId", "Score"]].copy()
+    df = df.join(user_agg,    on="UserId",    how="left")
+    df = df.join(product_agg, on="ProductId", how="left")
+
+    # LOO sum and count (exclude current sample)
+    df["u_sum_loo"]   = df["u_sum"]   - df["Score"]
+    df["u_count_loo"] = df["u_count"] - 1
+    df["p_sum_loo"]   = df["p_sum"]   - df["Score"]
+    df["p_count_loo"] = df["p_count"] - 1
+
+    # LOO raw mean (fall back to global_mean when user/product has only 1 review)
+    df["u_raw_loo"] = np.where(
+        df["u_count_loo"] > 0, df["u_sum_loo"] / df["u_count_loo"], global_mean
+    )
+    df["p_raw_loo"] = np.where(
+        df["p_count_loo"] > 0, df["p_sum_loo"] / df["p_count_loo"], global_mean
+    )
+
+    # Smoothed LOO means
+    df["user_mean_score"] = (
+        (df["u_count_loo"] * df["u_raw_loo"] + shrinkage * global_mean)
+        / (df["u_count_loo"] + shrinkage)
+    )
+    df["product_mean_score"] = (
+        (df["p_count_loo"] * df["p_raw_loo"] + shrinkage * global_mean)
+        / (df["p_count_loo"] + shrinkage)
+    )
+
+    df["user_review_count"]    = df["u_count_loo"].clip(lower=0)
+    df["product_review_count"] = df["p_count_loo"].clip(lower=0)
+    df["user_score_std"]       = df["u_std"].fillna(global_std)
+    df["product_score_std"]    = df["p_std"].fillna(global_std)
+    df["user_bias"]            = df["user_mean_score"] - global_mean
+    df["product_bias"]         = df["product_mean_score"] - global_mean
+    df["user_product_bias"]    = df["user_bias"] + df["product_bias"]
+
+    return df[["user_mean_score", "user_review_count", "user_score_std",
+               "product_mean_score", "product_review_count", "product_score_std",
+               "user_bias", "product_bias", "user_product_bias"]].values
 
 
 def build_numeric_features(df):
@@ -138,29 +207,22 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     }
     stop_words = list(text.ENGLISH_STOP_WORDS.union(movie_stop))
 
-    # TF-IDF on combined Summary + Text
-    combined_text = (
-        labeled["Summary"].fillna("").astype(str) + " " +
-        labeled["Text"].fillna("").astype(str)
+    base_tfidf_kwargs = dict(
+        lowercase=True, stop_words=stop_words, ngram_range=ngram_range,
+        min_df=3, max_df=0.9, sublinear_tf=True, norm="l2",
+        smooth_idf=True, use_idf=True,
     )
 
-    tfidf = TfidfVectorizer(
-        lowercase=True,
-        stop_words=stop_words,
-        ngram_range=ngram_range,
-        min_df=3,
-        max_df=0.9,
-        sublinear_tf=True,
-        norm="l2",
-        smooth_idf=True,
-        use_idf=True,
-        max_features=max_features
-    )
+    # Separate TF-IDF for Summary (high-signal, short) and Text (longer, noisier)
+    tfidf_summary = TfidfVectorizer(max_features=10000, **base_tfidf_kwargs)
+    tfidf_text    = TfidfVectorizer(max_features=max_features, **base_tfidf_kwargs)
 
-    X_text = tfidf.fit_transform(combined_text)
-    print("TF-IDF matrix shape:", X_text.shape)
+    X_summary = tfidf_summary.fit_transform(labeled["Summary"].fillna("").astype(str))
+    X_text_body = tfidf_text.fit_transform(labeled["Text"].fillna("").astype(str))
+    X_text = hstack([X_summary, X_text_body])
+    print("Summary TF-IDF:", X_summary.shape, " Text TF-IDF:", X_text_body.shape)
 
-    # LSA: reduce TF-IDF to 200 dense semantic components
+    # LSA on the combined sparse matrix
     svd = TruncatedSVD(n_components=200, random_state=42)
     X_lsa = svd.fit_transform(X_text)
     X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
@@ -171,26 +233,23 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     X_lsa_sparse = csr_matrix(X_lsa)
     X = hstack([X_num_sparse, X_bias_sparse, X_text, X_lsa_sparse])
 
-    return X, y, tfidf, svd, numeric_columns, labeled
+    return X, y, tfidf_summary, tfidf_text, svd, numeric_columns, labeled
 
 
-def prepare_test_data(test_df, tfidf, svd, numeric_columns, labeled_df, text_column="Text"):
+def prepare_test_data(test_df, tfidf_summary, tfidf_text, svd, numeric_columns, labeled_df):
     # Bias features: compute from labeled data, apply to test
     bias = build_bias_features(labeled_df, test_df)
 
-    # Numeric features
+    # Numeric + sentiment features
     num_feats = build_numeric_features(test_df)
     sentiment = build_sentiment_features(test_df)
     num_feats = pd.concat([num_feats, sentiment], axis=1)
     num_feats = num_feats.reindex(columns=numeric_columns, fill_value=0).fillna(0)
 
-    combined_text = (
-        test_df["Summary"].fillna("").astype(str) + " " +
-        test_df["Text"].fillna("").astype(str)
-    )
-    X_text = tfidf.transform(combined_text)
+    X_summary   = tfidf_summary.transform(test_df["Summary"].fillna("").astype(str))
+    X_text_body = tfidf_text.transform(test_df["Text"].fillna("").astype(str))
+    X_text = hstack([X_summary, X_text_body])
 
-    # Apply fitted SVD
     X_lsa = svd.transform(X_text)
     X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
 
