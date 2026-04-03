@@ -1,5 +1,7 @@
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.feature_extraction import text
+from sklearn.decomposition import TruncatedSVD
+from sklearn.preprocessing import Normalizer
 from scipy.sparse import hstack, csr_matrix
 import pandas as pd
 import numpy as np
@@ -118,14 +120,21 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     X_text = tfidf.fit_transform(combined_text)
     print("TF-IDF matrix shape:", X_text.shape)
 
+    # LSA: reduce TF-IDF to 200 dense semantic components
+    svd = TruncatedSVD(n_components=200, random_state=42)
+    X_lsa = svd.fit_transform(X_text)
+    X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
+    print(f"LSA explained variance: {svd.explained_variance_ratio_.sum():.3f}")
+
     X_num_sparse = csr_matrix(num_feats.values)
     X_bias_sparse = csr_matrix(bias)
-    X = hstack([X_num_sparse, X_bias_sparse, X_text])
+    X_lsa_sparse = csr_matrix(X_lsa)
+    X = hstack([X_num_sparse, X_bias_sparse, X_text, X_lsa_sparse])
 
-    return X, y, tfidf, numeric_columns, labeled
+    return X, y, tfidf, svd, numeric_columns, labeled
 
 
-def prepare_test_data(test_df, tfidf, numeric_columns, labeled_df, text_column="Text"):
+def prepare_test_data(test_df, tfidf, svd, numeric_columns, labeled_df, text_column="Text"):
     # Bias features: compute from labeled data, apply to test
     bias = build_bias_features(labeled_df, test_df)
 
@@ -139,8 +148,13 @@ def prepare_test_data(test_df, tfidf, numeric_columns, labeled_df, text_column="
     )
     X_text = tfidf.transform(combined_text)
 
+    # Apply fitted SVD
+    X_lsa = svd.transform(X_text)
+    X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
+
     X_num_sparse = csr_matrix(num_feats.values)
     X_bias_sparse = csr_matrix(bias)
-    X_test = hstack([X_num_sparse, X_bias_sparse, X_text])
+    X_lsa_sparse = csr_matrix(X_lsa)
+    X_test = hstack([X_num_sparse, X_bias_sparse, X_text, X_lsa_sparse])
 
     return X_test

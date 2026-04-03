@@ -68,6 +68,12 @@ Please take a look at the starter code in the jupyter notebook.
   - TF-IDF on concatenated `Summary + Text`
   - 30,000 features, 1–2 n-grams, sublinear TF, L2 norm
   - Custom stopwords: added movie-domain words (film, watch, etc.)
+
+  ** Add LSA/SVD semantic features and user/product bias to improve RMSE **
+
+  - Added TruncatedSVD (200 components) on TF-IDF matrix for latent semantic features
+  - Added user and product bias features (mean score per user/product, deviation from global mean)
+
   
   ### Why these features?
   User bias is the single most predictive feature for review datasets. If a user habitually rates 5 stars or 1 star, that pattern generalizes. Similarly, products that consistently receive high or low ratings carry that signal. Together these features account for most of the rating variance not captured by text alone.
