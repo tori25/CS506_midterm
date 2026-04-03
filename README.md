@@ -109,8 +109,11 @@ Please take a look at the starter code in the jupyter notebook.
 
 
 # Difficulties : 
-I tested LSA with TruncatedSVD, but it increased validation RMSE from 1.1823 to 1.1929, so I kept the raw TF-IDF representation.
-I was using a hardcore dummy set for testing , and not  actualy implementing predictions and found myself cought in a deadend. 
+- I tested LSA with TruncatedSVD, but it increased validation RMSE from 1.1823 to 1.1929, so I kept the raw TF-IDF representation.
+- I was using a hardcore dummy set for testing , and not  actualy implementing predictions and found myself cought in a deadend. 
+- Data leakage — when computing user and product bias features (mean rating per user/product), I was calculating them from the entire labeled dataset before splitting into train/validation. This meant the
+  validation set's bias features included its own scores in the mean, so the model effectively "saw" the answers during evaluation. Local RMSE appeared to be 0.579 while Kaggle scored 0.979 — a gap that revealed
+  the leak. The fix was to split the labeled DataFrame first, then compute all bias statistics exclusively from the training fold and apply them to the validation fold.
 
 # Root causes of old poor performance:
   1. Previous submission used hardcoded 3.5 for all predictions — the model was never actually used

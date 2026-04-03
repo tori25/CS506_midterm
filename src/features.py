@@ -7,39 +7,53 @@ import pandas as pd
 import numpy as np
 
 
-def build_bias_features(train_labeled, all_data):
+def build_bias_features(train_labeled, all_data, shrinkage=10):
     """
-    Compute user-level and product-level average scores from labeled training rows.
-    Returns a DataFrame of bias features indexed by the same index as all_data.
+    Compute smoothed (Bayesian) user and product bias features.
+    shrinkage=k: rare users/products are pulled toward global mean.
+    Formula: smoothed_mean = (n * raw_mean + k * global_mean) / (n + k)
     """
+    global_mean = train_labeled["Score"].mean()
+
     user_stats = (
         train_labeled.groupby("UserId")["Score"]
-        .agg(user_mean_score="mean", user_review_count="count")
+        .agg(user_raw_mean="mean", user_review_count="count")
         .reset_index()
     )
     product_stats = (
         train_labeled.groupby("ProductId")["Score"]
-        .agg(product_mean_score="mean", product_review_count="count")
+        .agg(product_raw_mean="mean", product_review_count="count")
         .reset_index()
     )
 
-    global_mean = train_labeled["Score"].mean()
+    # Smoothed means
+    user_stats["user_mean_score"] = (
+        (user_stats["user_review_count"] * user_stats["user_raw_mean"] + shrinkage * global_mean)
+        / (user_stats["user_review_count"] + shrinkage)
+    )
+    product_stats["product_mean_score"] = (
+        (product_stats["product_review_count"] * product_stats["product_raw_mean"] + shrinkage * global_mean)
+        / (product_stats["product_review_count"] + shrinkage)
+    )
 
     df = all_data[["UserId", "ProductId"]].copy()
-    df = df.merge(user_stats, on="UserId", how="left")
-    df = df.merge(product_stats, on="ProductId", how="left")
+    df = df.merge(user_stats[["UserId", "user_mean_score", "user_review_count"]], on="UserId", how="left")
+    df = df.merge(product_stats[["ProductId", "product_mean_score", "product_review_count"]], on="ProductId", how="left")
 
     df["user_mean_score"] = df["user_mean_score"].fillna(global_mean)
     df["user_review_count"] = df["user_review_count"].fillna(0)
     df["product_mean_score"] = df["product_mean_score"].fillna(global_mean)
     df["product_review_count"] = df["product_review_count"].fillna(0)
 
-    # Difference between user average and global average (user bias)
     df["user_bias"] = df["user_mean_score"] - global_mean
     df["product_bias"] = df["product_mean_score"] - global_mean
 
+    # Combined bias signal
+    df["user_product_bias"] = df["user_bias"] + df["product_bias"]
+
     return df[["user_mean_score", "user_review_count", "product_mean_score",
-               "product_review_count", "user_bias", "product_bias"]].values
+               "product_review_count", "user_bias", "product_bias",
+               "user_product_bias"]].values
 
 
 def build_numeric_features(df):
