@@ -6,3 +6,4 @@ jupyter
 nbconvert
 vaderSentiment
 lightgbm
+nltk

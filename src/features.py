@@ -146,6 +146,44 @@ def build_bias_features_loo(train_labeled, shrinkage=10):
                "user_bias", "product_bias", "user_product_bias"]].values
 
 
+def build_baseline(train_labeled, all_data, shrinkage=10):
+    """
+    Bias baseline for two-stage residual prediction.
+    baseline = clip(user_smoothed_mean + product_smoothed_mean - global_mean, 1, 5)
+    """
+    global_mean = train_labeled["Score"].mean()
+
+    user_stats = (
+        train_labeled.groupby("UserId")["Score"]
+        .agg(u_mean="mean", u_count="count")
+        .reset_index()
+    )
+    product_stats = (
+        train_labeled.groupby("ProductId")["Score"]
+        .agg(p_mean="mean", p_count="count")
+        .reset_index()
+    )
+
+    user_stats["user_smoothed"] = (
+        (user_stats["u_count"] * user_stats["u_mean"] + shrinkage * global_mean)
+        / (user_stats["u_count"] + shrinkage)
+    )
+    product_stats["product_smoothed"] = (
+        (product_stats["p_count"] * product_stats["p_mean"] + shrinkage * global_mean)
+        / (product_stats["p_count"] + shrinkage)
+    )
+
+    df = all_data[["UserId", "ProductId"]].copy()
+    df = df.merge(user_stats[["UserId", "user_smoothed"]], on="UserId", how="left")
+    df = df.merge(product_stats[["ProductId", "product_smoothed"]], on="ProductId", how="left")
+
+    df["user_smoothed"]    = df["user_smoothed"].fillna(global_mean)
+    df["product_smoothed"] = df["product_smoothed"].fillna(global_mean)
+
+    baseline = df["user_smoothed"].values + df["product_smoothed"].values - global_mean
+    return np.clip(baseline, 1, 5)
+
+
 def build_numeric_features(df):
     X = pd.DataFrame(index=df.index)
 
@@ -188,13 +226,12 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
 
     y = labeled["Score"].values
 
-    # Bias features (fit only on labeled, applied to labeled)
-    bias = build_bias_features(labeled, labeled)
+    # Two-stage: compute bias baseline, train text model on residuals
+    baseline = build_baseline(labeled, labeled)
+    y_residual = y - baseline
 
-    # Numeric features
+    # Numeric + sentiment features (bias is in the baseline, not in X)
     num_feats = build_numeric_features(labeled)
-
-    # Sentiment features
     sentiment = build_sentiment_features(labeled)
     num_feats = pd.concat([num_feats, sentiment], axis=1)
 
@@ -240,18 +277,17 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     print(f"LSA explained variance: {svd.explained_variance_ratio_.sum():.3f}")
 
     X_num_sparse = csr_matrix(num_feats.values)
-    X_bias_sparse = csr_matrix(bias)
     X_lsa_sparse = csr_matrix(X_lsa)
-    X = hstack([X_num_sparse, X_bias_sparse, X_text, X_lsa_sparse])
+    X = hstack([X_num_sparse, X_text, X_lsa_sparse])
 
-    return X, y, tfidf_summary, tfidf_text, tfidf_char, svd, numeric_columns, labeled
+    return X, y_residual, baseline, tfidf_summary, tfidf_text, tfidf_char, svd, numeric_columns, labeled
 
 
 def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, svd, numeric_columns, labeled_df):
-    # Bias features: compute from labeled data, apply to test
-    bias = build_bias_features(labeled_df, test_df)
+    # Bias baseline for final prediction reconstruction
+    baseline_test = build_baseline(labeled_df, test_df)
 
-    # Numeric + sentiment features
+    # Numeric + sentiment features (no bias in X — bias is in baseline)
     num_feats = build_numeric_features(test_df)
     sentiment = build_sentiment_features(test_df)
     num_feats = pd.concat([num_feats, sentiment], axis=1)
@@ -266,8 +302,7 @@ def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, svd, numer
     X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
 
     X_num_sparse = csr_matrix(num_feats.values)
-    X_bias_sparse = csr_matrix(bias)
     X_lsa_sparse = csr_matrix(X_lsa)
-    X_test = hstack([X_num_sparse, X_bias_sparse, X_text, X_lsa_sparse])
+    X_test = hstack([X_num_sparse, X_text, X_lsa_sparse])
 
-    return X_test
+    return X_test, baseline_test

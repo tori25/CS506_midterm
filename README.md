@@ -25,7 +25,7 @@ make all    # everything
 
 ## What I built
 
-Started with a dummy baseline (predict mean 3.5 for everything) and worked up to an ensemble of Ridge + LightGBM.
+Started with a dummy baseline (predict mean 3.5 for everything) and worked up to a two-stage ensemble of Ridge + LightGBM.
 
 | Model | Validation RMSE |
 |---|---|
@@ -34,7 +34,9 @@ Started with a dummy baseline (predict mean 3.5 for everything) and worked up to
 | + bias features | 0.87 |
 | + VADER sentiment | 0.8423 |
 | + separate Summary/Text TF-IDF | 0.8008 |
-| **+ LightGBM ensemble** | **~0.787** |
+| + character n-grams (3–5) | 0.7864 |
+| + LightGBM ensemble | ~0.776 |
+| **+ two-stage residual prediction** | **~0.759** |
 
 Best submission: `submissions/submission_ensemble.csv`
 
@@ -42,40 +44,82 @@ Best submission: `submissions/submission_ensemble.csv`
 
 ## The model
 
-Two models averaged together:
+### Two-stage residual prediction
 
-**Ridge (~70% weight)** — trained on sparse TF-IDF + LSA + bias + sentiment + numeric features. Ridge handles high-dimensional sparse text really well.
+Instead of throwing everything into one model, I split the prediction into two stages:
 
-**LightGBM (~30% weight)** — trained on dense features only (LSA + bias + sentiment + numeric). Trees don't play well with 30k sparse TF-IDF columns so I kept it dense.
+**Stage 1 — bias baseline:**
+```
+baseline = clip(smoothed_user_mean + smoothed_product_mean - global_mean, 1, 5)
+```
+This captures the fact that some users always give 5 stars and some products always get 1 star.
 
-The blend weight was picked by sweeping Ridge 50%→95% on the validation set and taking the best.
+**Stage 2 — text model on residual:**
+```
+residual = score - baseline
+```
+Ridge and LightGBM are both trained to predict the residual — how much the text pushes the score above or below what the user/product bias predicts.
+
+**Final prediction:**
+```
+prediction = clip(baseline + Ridge_weight * ridge_residual + LightGBM_weight * lgbm_residual, 1, 5)
+```
+
+This is better than the all-in-one approach because the text model can focus purely on the content signal without having to also learn the user/product patterns.
+
+### Ridge (~75% weight)
+Trained on sparse features: separate TF-IDF (Summary + Text) + character n-grams + LSA + numeric + sentiment. No bias in the feature matrix — bias is already in the baseline.
+
+### LightGBM (~25% weight)
+Trained on dense features: LSA + numeric + sentiment + LOO bias (as residual correction signals). Uses leave-one-out bias to prevent target leakage during training.
+
+The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 
 ---
 
 ## Features
 
 **Text:**
-- Separate TF-IDF for `Summary` (10k features) and `Text` (30k features) — summaries are short and punchy, body text is long and noisy, so treating them separately helps
-- LSA/SVD (200 components) on the combined matrix for dense semantic features
+- Separate TF-IDF for `Summary` (10k features, `min_df=2`) and `Text` (30k features, `min_df=2`) — tested concatenated vs separate, separate wins by ~0.02 RMSE
+- Character n-grams (`char_wb`, 3–5, 20k features) on Text — catches morphological patterns like "terribl", "excellen", "amaz" across word forms
+- LSA/SVD (200 components) on the combined text matrix for dense semantic features
 
-**User & product bias** (most impactful):
-- Smoothed mean score per user and per product (Bayesian shrinkage, k=10)
-- Bias = deviation from global mean (~3.97)
-- Std of scores — captures whether a user is consistent or all over the place
-- For LightGBM training: used leave-one-out bias to avoid leaking the target into the features
+**User & product bias baseline (Stage 1):**
+- Smoothed Bayesian mean per user and per product (shrinkage k=10)
+- `baseline = clip(user_smoothed + product_smoothed - global_mean, 1, 5)`
+- Unknown users/products fall back to global mean
+
+**Bias features for LightGBM (residual correction signals):**
+- Leave-one-out smoothed means — each sample's user/product mean computed without that sample's score
+- `user_score_std`, `product_score_std` — rating consistency of user/product
+- User and product review counts
 
 **Sentiment (VADER):**
 - Compound, positive, negative scores on both Summary and Text
-- Rule-based so no fitting needed — safe to apply to both folds
+- Rule-based, no fitting needed — no leakage risk
 
 **Numeric:**
 - Helpfulness ratio, text/summary length, word count, exclamation/question marks, uppercase ratio, unique word ratio, avg word length, year, month
 
 ---
 
+## What I tested and didn't use
+
+| Experiment | Result | Decision |
+|---|---|---|
+| Porter stemming | 0.7895 (worse) | Skip — review text relies on word form nuance |
+| WordNet lemmatization | 0.8064 (worse) | Skip |
+| Concatenated Summary+Text TF-IDF | 0.8057 (worse) | Skip — separate is better |
+| `min_df=5` | 0.8232 (worse) | Skip — too aggressive |
+| `max_features=50k` text | 0.7948 (worse) | Skip — adds noise |
+| LightGBM with raw TF-IDF | overfits badly | Skip — use Ridge for sparse text |
+| LightGBM with LSA (no LOO bias) | Train 0.34 / Valid 1.10 | Skip — LSA acts as fingerprint |
+
+---
+
 ## Validation
 
-80/20 stratified split on Score. All transformers fit on the train fold only. Final models retrained on all labeled data before submission.
+80/20 stratified split on Score (`random_state=42`). All transformers (TF-IDF, SVD, bias statistics) fit on the train fold only, applied to the validation fold. Final models retrained on all labeled data before submission.
 
 ---
 
@@ -83,9 +127,11 @@ The blend weight was picked by sweeping Ridge 50%→95% on the validation set an
 
 **Data leakage** — I was computing user/product bias from the full dataset before splitting. The validation set's own scores were baked into the bias features, so local RMSE looked great (0.579) but Kaggle said 0.979. Splitting first fixed it.
 
-**LightGBM overfitting** — first attempt got Train RMSE 0.34 / Valid RMSE 1.10. The bias features were including each sample's own score in its user mean, so trees just memorized. Fixed with leave-one-out bias.
+**LightGBM overfitting with regular bias** — first attempt got Train RMSE 0.34 / Valid RMSE 1.10. The bias features included each sample's own score in its user mean, so trees memorized. Fixed with leave-one-out bias.
 
-**LSA fingerprinting** — 200 dense LSA components are basically a unique fingerprint per review. LightGBM memorized the training set through them. Kept LSA for Ridge only.
+**LSA fingerprinting** — 200 dense LSA components are basically a unique fingerprint per review. LightGBM memorized training samples through them. Kept LSA for Ridge only; LightGBM uses it only with LOO bias as a regularizing signal.
+
+**LightGBM data leakage in final training** — final LightGBM was using the held-out validation fold for early stopping even though those samples were already in the training data. Fixed by reading `best_iteration_` from the validation run and using that fixed number of trees for the final fit.
 
 **Dummy prediction bug** — early submissions predicted 3.5 for everything because the model was trained but never actually called for predictions.
 
@@ -99,15 +145,17 @@ CS506_midterm/
 │   ├── train.csv
 │   └── test.csv
 ├── notebooks/
-│   ├── modeling.ipynb
+│   ├── modeling.ipynb      # full pipeline
 │   └── eda.ipynb
 ├── src/
-│   ├── data.py        # loading data
-│   ├── features.py    # all feature engineering
-│   └── model.py       # Ridge, LightGBM, eval, submission
+│   ├── data.py             # loading data
+│   ├── features.py         # TF-IDF, char n-grams, bias, baseline, sentiment, numeric
+│   └── model.py            # Ridge, LightGBM, eval, submission
 ├── submissions/
-│   ├── submission.csv             # Ridge only
-│   └── submission_ensemble.csv   # best — Ridge + LightGBM
+│   ├── submission.csv             # Ridge two-stage only
+│   └── submission_ensemble.csv   # best — Ridge + LightGBM ensemble
+├── assets/
+│   └── predicted_score_dist.png
 ├── requirements.txt
 └── Makefile
 ```
