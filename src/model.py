@@ -4,11 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from sklearn.linear_model import Ridge
-from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, VotingRegressor
+from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.svm import LinearSVR
 from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import cross_val_score
-import lightgbm as lgb
 
 
 def train_ridge(X_train, y_train, alpha=10.0):
@@ -17,25 +15,22 @@ def train_ridge(X_train, y_train, alpha=10.0):
     return model
 
 
-def train_lgbm(X_train, y_train, X_valid, y_valid,
-               n_estimators=2000, learning_rate=0.05,
-               num_leaves=63, min_child_samples=20):
-    model = lgb.LGBMRegressor(
+def train_extra_trees(X_train, y_train,
+                      n_estimators=300, min_samples_leaf=20,
+                      max_features=0.3, random_state=42):
+    """
+    ExtraTreesRegressor on dense features (LSA + numeric + sentiment + LOO bias).
+    Extremely Randomized Trees: uses random splits (not best splits) so it is
+    faster and more regularized than Random Forest. Not a boosting method.
+    """
+    model = ExtraTreesRegressor(
         n_estimators=n_estimators,
-        learning_rate=learning_rate,
-        num_leaves=num_leaves,
-        min_child_samples=min_child_samples,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
+        min_samples_leaf=min_samples_leaf,
+        max_features=max_features,
+        random_state=random_state,
         n_jobs=-1,
-        verbose=-1,
     )
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_valid, y_valid)],
-        callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)],
-    )
+    model.fit(X_train, y_train)
     return model
 
 

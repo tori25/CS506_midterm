@@ -35,7 +35,7 @@ Started with a dummy baseline (predict mean 3.5 for everything) and worked up to
 | + VADER sentiment | 0.8423 |
 | + separate Summary/Text TF-IDF | 0.8008 |
 | + character n-grams (3–5) | 0.7864 |
-| + LightGBM ensemble | ~0.776 |
+| + ExtraTrees ensemble | ~0.776 |
 | **+ two-stage residual prediction** | **~0.759** |
 
 Best submission: `submissions/submission_ensemble.csv`
@@ -68,10 +68,10 @@ prediction = clip(baseline + Ridge_weight * ridge_residual + LightGBM_weight * l
 This is better than the all-in-one approach because the text model can focus purely on the content signal without having to also learn the user/product patterns.
 
 ### Ridge (~75% weight)
-Trained on sparse features: separate TF-IDF (Summary + Text) + character n-grams + LSA + numeric + sentiment. No bias in the feature matrix — bias is already in the baseline.
+Trained on sparse features: separate TF-IDF (Summary + Text) + character n-grams on Text + character n-grams on Summary + LSA + numeric + sentiment. No bias in the feature matrix — bias is already in the baseline.
 
-### LightGBM (~25% weight)
-Trained on dense features: LSA + numeric + sentiment + LOO bias (as residual correction signals). Uses leave-one-out bias to prevent target leakage during training.
+### ExtraTreesRegressor (~25% weight)
+Trained on dense features: LSA + numeric + sentiment + LOO bias (as residual correction signals). Uses leave-one-out bias to prevent target leakage during training. ExtraTrees uses random splits rather than optimized splits — it is a bagging method, not boosting.
 
 The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 
@@ -81,7 +81,8 @@ The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 
 **Text:**
 - Separate TF-IDF for `Summary` (10k features, `min_df=2`) and `Text` (30k features, `min_df=2`) — tested concatenated vs separate, separate wins by ~0.02 RMSE
-- Character n-grams (`char_wb`, 3–5, 20k features) on Text — catches morphological patterns like "terribl", "excellen", "amaz" across word forms
+- Character n-grams (`char_wb`, 3–5) on `Text` (20k features) — catches morphological patterns like "terribl", "excellen", "amaz" across word forms
+- Character n-grams (`char_wb`, 3–5) on `Summary` (10k features) — high-signal short phrases like "must see", "avoid"
 - LSA/SVD (200 components) on the combined text matrix for dense semantic features
 
 **User & product bias baseline (Stage 1):**
@@ -98,8 +99,15 @@ The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 - Compound, positive, negative scores on both Summary and Text
 - Rule-based, no fitting needed — no leakage risk
 
+**Sentiment (VADER):**
+- Compound, positive, negative scores on both Summary and Text
+- `vader_ratio = pos / (neg + 0.01)` — continuous signal for strongly positive vs negative reviews
+- Rule-based, no fitting needed — no leakage risk
+
 **Numeric:**
-- Helpfulness ratio, text/summary length, word count, exclamation/question marks, uppercase ratio, unique word ratio, avg word length, year, month
+- Helpfulness ratio, text/summary length, word count, exclamation/question marks, uppercase ratio, unique word ratio, avg word length, year, month, quarter
+- `SentenceCount`, `AvgSentenceLength` — structural review features
+- `HelpfulnessXLength = HelpfulnessRatio × log1p(TextLength)` — interaction: long, helpful reviews tend to be more informative
 
 ---
 
@@ -112,8 +120,8 @@ The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 | Concatenated Summary+Text TF-IDF | 0.8057 (worse) | Skip — separate is better |
 | `min_df=5` | 0.8232 (worse) | Skip — too aggressive |
 | `max_features=50k` text | 0.7948 (worse) | Skip — adds noise |
-| LightGBM with raw TF-IDF | overfits badly | Skip — use Ridge for sparse text |
-| LightGBM with LSA (no LOO bias) | Train 0.34 / Valid 1.10 | Skip — LSA acts as fingerprint |
+| ExtraTrees with raw TF-IDF | overfits badly | Skip — use Ridge for sparse text |
+| ExtraTrees with LSA (no LOO bias) | high overfitting | Skip — LOO bias is essential |
 
 ---
 
@@ -131,7 +139,7 @@ The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 
 **LSA fingerprinting** — 200 dense LSA components are basically a unique fingerprint per review. LightGBM memorized training samples through them. Kept LSA for Ridge only; LightGBM uses it only with LOO bias as a regularizing signal.
 
-**LightGBM data leakage in final training** — final LightGBM was using the held-out validation fold for early stopping even though those samples were already in the training data. Fixed by reading `best_iteration_` from the validation run and using that fixed number of trees for the final fit.
+**ExtraTrees overfitting** — early ExtraTrees runs without `min_samples_leaf` overfit badly on training data. Fixed by setting `min_samples_leaf=20` to force sufficient data at each leaf.
 
 **Dummy prediction bug** — early submissions predicted 3.5 for everything because the model was trained but never actually called for predictions.
 
@@ -153,7 +161,7 @@ CS506_midterm/
 │   └── model.py            # Ridge, LightGBM, eval, submission
 ├── submissions/
 │   ├── submission.csv             # Ridge two-stage only
-│   └── submission_ensemble.csv   # best — Ridge + LightGBM ensemble
+│   └── submission_ensemble.csv   # best — Ridge + ExtraTrees ensemble
 ├── assets/
 │   └── predicted_score_dist.png
 ├── requirements.txt

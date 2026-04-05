@@ -25,6 +25,9 @@ def build_sentiment_features(df):
     result["text_vader_compound"]    = text_scores.apply(lambda s: s["compound"])
     result["text_vader_pos"]         = text_scores.apply(lambda s: s["pos"])
     result["text_vader_neg"]         = text_scores.apply(lambda s: s["neg"])
+    # Ratio: positive signal relative to negative signal
+    result["summary_vader_ratio"]    = result["summary_vader_pos"] / (result["summary_vader_neg"] + 0.01)
+    result["text_vader_ratio"]       = result["text_vader_pos"] / (result["text_vader_neg"] + 0.01)
     return result
 
 
@@ -213,9 +216,19 @@ def build_numeric_features(df):
         lambda x: np.mean([len(w) for w in x.split()]) if x.split() else 0
     )
 
+    # Sentence-level features
+    X["SentenceCount"] = text_col.apply(
+        lambda x: max(1, x.count(".") + x.count("!") + x.count("?"))
+    )
+    X["AvgSentenceLength"] = X["TextWordCount"] / X["SentenceCount"]
+
+    # Helpfulness × text length interaction (engaged, helpful long reviews)
+    X["HelpfulnessXLength"] = X["HelpfulnessRatio"] * np.log1p(X["TextLength"])
+
     dt = pd.to_datetime(df["Time"], unit="s", errors="coerce")
-    X["Year"] = dt.dt.year.fillna(0)
-    X["Month"] = dt.dt.month.fillna(0)
+    X["Year"]    = dt.dt.year.fillna(0)
+    X["Month"]   = dt.dt.month.fillna(0)
+    X["Quarter"] = dt.dt.quarter.fillna(0)
 
     return X.fillna(0)
 
@@ -255,20 +268,28 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     tfidf_text    = TfidfVectorizer(max_features=max_features, **base_tfidf_kwargs)
 
     # Character n-grams on Text (3–5): catch morphological patterns like "terribl", "excellen"
-    # char_wb pads within word boundaries so n-grams don't cross word boundaries
     tfidf_char = TfidfVectorizer(
         analyzer="char_wb", ngram_range=(3, 5),
         min_df=5, max_df=0.9, sublinear_tf=True, norm="l2",
         max_features=20000, lowercase=True,
     )
 
-    X_summary   = tfidf_summary.fit_transform(labeled["Summary"].fillna("").astype(str))
-    X_text_body = tfidf_text.fit_transform(labeled["Text"].fillna("").astype(str))
-    X_char      = tfidf_char.fit_transform(labeled["Text"].fillna("").astype(str))
-    X_text = hstack([X_summary, X_text_body, X_char])
+    # Character n-grams on Summary (3–5): short high-signal phrases like "must see", "avoid"
+    tfidf_char_summary = TfidfVectorizer(
+        analyzer="char_wb", ngram_range=(3, 5),
+        min_df=5, max_df=0.9, sublinear_tf=True, norm="l2",
+        max_features=10000, lowercase=True,
+    )
+
+    X_summary      = tfidf_summary.fit_transform(labeled["Summary"].fillna("").astype(str))
+    X_text_body    = tfidf_text.fit_transform(labeled["Text"].fillna("").astype(str))
+    X_char         = tfidf_char.fit_transform(labeled["Text"].fillna("").astype(str))
+    X_char_summary = tfidf_char_summary.fit_transform(labeled["Summary"].fillna("").astype(str))
+    X_text = hstack([X_summary, X_text_body, X_char, X_char_summary])
     print("Summary TF-IDF:", X_summary.shape,
           " Text TF-IDF:", X_text_body.shape,
-          " Char n-grams:", X_char.shape)
+          " Char n-grams (Text):", X_char.shape,
+          " Char n-grams (Summary):", X_char_summary.shape)
 
     # LSA on the combined sparse matrix
     svd = TruncatedSVD(n_components=200, random_state=42)
@@ -280,10 +301,13 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     X_lsa_sparse = csr_matrix(X_lsa)
     X = hstack([X_num_sparse, X_text, X_lsa_sparse])
 
-    return X, y_residual, baseline, tfidf_summary, tfidf_text, tfidf_char, svd, numeric_columns, labeled
+    return (X, y_residual, baseline,
+            tfidf_summary, tfidf_text, tfidf_char, tfidf_char_summary,
+            svd, numeric_columns, labeled)
 
 
-def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, svd, numeric_columns, labeled_df):
+def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, tfidf_char_summary,
+                      svd, numeric_columns, labeled_df):
     # Bias baseline for final prediction reconstruction
     baseline_test = build_baseline(labeled_df, test_df)
 
@@ -293,10 +317,11 @@ def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, svd, numer
     num_feats = pd.concat([num_feats, sentiment], axis=1)
     num_feats = num_feats.reindex(columns=numeric_columns, fill_value=0).fillna(0)
 
-    X_summary   = tfidf_summary.transform(test_df["Summary"].fillna("").astype(str))
-    X_text_body = tfidf_text.transform(test_df["Text"].fillna("").astype(str))
-    X_char      = tfidf_char.transform(test_df["Text"].fillna("").astype(str))
-    X_text = hstack([X_summary, X_text_body, X_char])
+    X_summary      = tfidf_summary.transform(test_df["Summary"].fillna("").astype(str))
+    X_text_body    = tfidf_text.transform(test_df["Text"].fillna("").astype(str))
+    X_char         = tfidf_char.transform(test_df["Text"].fillna("").astype(str))
+    X_char_summary = tfidf_char_summary.transform(test_df["Summary"].fillna("").astype(str))
+    X_text = hstack([X_summary, X_text_body, X_char, X_char_summary])
 
     X_lsa = svd.transform(X_text)
     X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
