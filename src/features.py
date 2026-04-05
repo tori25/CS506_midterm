@@ -209,7 +209,7 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
 
     base_tfidf_kwargs = dict(
         lowercase=True, stop_words=stop_words, ngram_range=ngram_range,
-        min_df=3, max_df=0.9, sublinear_tf=True, norm="l2",
+        min_df=2, max_df=0.9, sublinear_tf=True, norm="l2",
         smooth_idf=True, use_idf=True,
     )
 
@@ -217,10 +217,21 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     tfidf_summary = TfidfVectorizer(max_features=10000, **base_tfidf_kwargs)
     tfidf_text    = TfidfVectorizer(max_features=max_features, **base_tfidf_kwargs)
 
-    X_summary = tfidf_summary.fit_transform(labeled["Summary"].fillna("").astype(str))
+    # Character n-grams on Text (3–5): catch morphological patterns like "terribl", "excellen"
+    # char_wb pads within word boundaries so n-grams don't cross word boundaries
+    tfidf_char = TfidfVectorizer(
+        analyzer="char_wb", ngram_range=(3, 5),
+        min_df=5, max_df=0.9, sublinear_tf=True, norm="l2",
+        max_features=20000, lowercase=True,
+    )
+
+    X_summary   = tfidf_summary.fit_transform(labeled["Summary"].fillna("").astype(str))
     X_text_body = tfidf_text.fit_transform(labeled["Text"].fillna("").astype(str))
-    X_text = hstack([X_summary, X_text_body])
-    print("Summary TF-IDF:", X_summary.shape, " Text TF-IDF:", X_text_body.shape)
+    X_char      = tfidf_char.fit_transform(labeled["Text"].fillna("").astype(str))
+    X_text = hstack([X_summary, X_text_body, X_char])
+    print("Summary TF-IDF:", X_summary.shape,
+          " Text TF-IDF:", X_text_body.shape,
+          " Char n-grams:", X_char.shape)
 
     # LSA on the combined sparse matrix
     svd = TruncatedSVD(n_components=200, random_state=42)
@@ -233,10 +244,10 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
     X_lsa_sparse = csr_matrix(X_lsa)
     X = hstack([X_num_sparse, X_bias_sparse, X_text, X_lsa_sparse])
 
-    return X, y, tfidf_summary, tfidf_text, svd, numeric_columns, labeled
+    return X, y, tfidf_summary, tfidf_text, tfidf_char, svd, numeric_columns, labeled
 
 
-def prepare_test_data(test_df, tfidf_summary, tfidf_text, svd, numeric_columns, labeled_df):
+def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, svd, numeric_columns, labeled_df):
     # Bias features: compute from labeled data, apply to test
     bias = build_bias_features(labeled_df, test_df)
 
@@ -248,7 +259,8 @@ def prepare_test_data(test_df, tfidf_summary, tfidf_text, svd, numeric_columns, 
 
     X_summary   = tfidf_summary.transform(test_df["Summary"].fillna("").astype(str))
     X_text_body = tfidf_text.transform(test_df["Text"].fillna("").astype(str))
-    X_text = hstack([X_summary, X_text_body])
+    X_char      = tfidf_char.transform(test_df["Text"].fillna("").astype(str))
+    X_text = hstack([X_summary, X_text_body, X_char])
 
     X_lsa = svd.transform(X_text)
     X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
