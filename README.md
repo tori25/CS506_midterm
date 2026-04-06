@@ -22,7 +22,7 @@ make all       # eda + run
 Started with a dummy baseline (predict mean 3.5 for everything) and worked up to a two-stage ensemble of Ridge + LightGBM.
 
 | Model | Validation RMSE |
-|---|---|
+|------
 | Dummy (predict 3.5) | ~1.18 |
 | Ridge + TF-IDF | 1.18 |
 | + bias features | 0.87 |
@@ -101,27 +101,8 @@ The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 
 ---
 
-## What I tested and didn't use
 
-| Experiment | Result | Decision |
-|---|---|---|
-| Porter stemming | 0.7895 (worse) | Skip — review text relies on word form nuance |
-| WordNet lemmatization | 0.8064 (worse) | Skip |
-| Concatenated Summary+Text TF-IDF | 0.8057 (worse) | Skip — separate is better |
-| `min_df=5` | 0.8232 (worse) | Skip — too aggressive |
-| `max_features=50k` text | 0.7948 (worse) | Skip — adds noise |
-| ExtraTrees with raw TF-IDF | overfits badly | Skip — use Ridge for sparse text |
-| ExtraTrees with LSA (no LOO bias) | high overfitting | Skip — LOO bias is essential |
-
----
-
-## Validation
-
-80/20 stratified split on Score (`random_state=42`). All transformers (TF-IDF, SVD, bias statistics) fit on the train fold only, applied to the validation fold. Final models retrained on all labeled data before submission.
-
----
-
-## Stuff that went wrong
+## What difficulties I had 
 
 **Data leakage** — I was computing user/product bias from the full dataset before splitting. The validation set's own scores were baked into the bias features, so local RMSE looked great (0.579) but Kaggle said 0.979. Splitting first fixed it.
 

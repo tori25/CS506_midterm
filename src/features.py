@@ -28,6 +28,8 @@ def build_sentiment_features(df):
     # Ratio: positive signal relative to negative signal
     result["summary_vader_ratio"]    = result["summary_vader_pos"] / (result["summary_vader_neg"] + 0.01)
     result["text_vader_ratio"]       = result["text_vader_pos"] / (result["text_vader_neg"] + 0.01)
+    # Sentiment gap: summary and body disagree → signals sarcasm or mixed reviews
+    result["sentiment_gap"]          = (result["summary_vader_compound"] - result["text_vader_compound"]).abs()
     return result
 
 
@@ -187,35 +189,88 @@ def build_baseline(train_labeled, all_data, shrinkage=10):
     return np.clip(baseline, 1, 5)
 
 
+_NEGATION_WORDS = frozenset([
+    "not", "no", "never", "neither", "nor", "nobody", "nothing", "nowhere",
+    "don't", "dont", "didn't", "didnt", "won't", "wont", "wouldn't", "wouldnt",
+    "couldn't", "couldnt", "can't", "cant", "isn't", "isnt", "aren't", "arent",
+    "wasn't", "wasnt", "weren't", "werent", "doesn't", "doesnt", "haven't", "havent",
+])
+
+_EXTREME_POS_WORDS = frozenset([
+    "amazing", "excellent", "perfect", "love", "best", "fantastic", "wonderful",
+    "awesome", "outstanding", "superb", "brilliant", "incredible", "delicious",
+    "favorite", "favourite", "exceptional", "phenomenal",
+])
+
+_EXTREME_NEG_WORDS = frozenset([
+    "terrible", "awful", "horrible", "worst", "hate", "disgusting", "disappointing",
+    "useless", "garbage", "trash", "pathetic", "dreadful", "atrocious", "abysmal",
+    "revolting", "nauseating", "inedible", "defective", "broken", "rotten",
+])
+
+
 def build_numeric_features(df):
     """Extract hand-crafted numeric features: helpfulness ratios, text lengths, punctuation, and time."""
     X = pd.DataFrame(index=df.index)
 
-    X["HelpfulnessRatio"] = (
-        df["HelpfulnessNumerator"] / (df["HelpfulnessDenominator"] + 1)
-    )
-    X["HelpfulnessDenominator"] = df["HelpfulnessDenominator"].fillna(0)
-    X["HelpfulnessNumerator"] = df["HelpfulnessNumerator"].fillna(0)
+    helpfulness_denom = df["HelpfulnessDenominator"].fillna(0)
+    helpfulness_num   = df["HelpfulnessNumerator"].fillna(0)
 
-    text_col = df["Text"].fillna("")
+    X["HelpfulnessRatio"]       = helpfulness_num / (helpfulness_denom + 1)
+    X["HelpfulnessDenominator"] = helpfulness_denom
+    X["HelpfulnessNumerator"]   = helpfulness_num
+    X["LogHelpfulnessDenom"]    = np.log1p(helpfulness_denom)  # less skewed than raw count
+
+    text_col    = df["Text"].fillna("")
     summary_col = df["Summary"].fillna("")
 
-    X["TextLength"] = text_col.apply(len)
-    X["SummaryLength"] = summary_col.apply(len)
-    X["TextWordCount"] = text_col.apply(lambda x: len(x.split()))
+    X["TextLength"]      = text_col.apply(len)
+    X["SummaryLength"]   = summary_col.apply(len)
+    X["TextWordCount"]   = text_col.apply(lambda x: len(x.split()))
     X["SummaryWordCount"] = summary_col.apply(lambda x: len(x.split()))
 
+    # Text/summary length ratio — very short summary + long rant can signal low ratings
+    X["TextSummaryLengthRatio"] = X["TextLength"] / (X["SummaryLength"] + 1)
+
     X["NumExclamation"] = text_col.apply(lambda x: x.count("!"))
-    X["NumQuestion"] = text_col.apply(lambda x: x.count("?"))
+    X["NumQuestion"]    = text_col.apply(lambda x: x.count("?"))
+
+    # Normalized punctuation density (raw counts are correlated with review length)
+    X["ExclPerWord"]     = X["NumExclamation"] / (X["TextWordCount"] + 1)
+    X["QuestionPerWord"] = X["NumQuestion"]    / (X["TextWordCount"] + 1)
+
+    # Repeated punctuation (!! or ?? or more) — signals strong emotion
+    X["RepeatedExcl"] = text_col.apply(lambda x: sum(1 for i in range(len(x) - 1) if x[i] == "!" and x[i+1] == "!"))
+    X["RepeatedQues"] = text_col.apply(lambda x: sum(1 for i in range(len(x) - 1) if x[i] == "?" and x[i+1] == "?"))
+
     X["UppercaseRatio"] = text_col.apply(
         lambda x: sum(1 for c in x if c.isupper()) / (len(x) + 1)
     )
+
+    # ALL-CAPS words (len >= 2) — shouting indicates strong feeling
+    X["AllCapsWordCount"] = text_col.apply(
+        lambda x: sum(1 for w in x.split() if len(w) >= 2 and w.isupper())
+    )
+
     X["UniqueWordRatio"] = text_col.apply(
         lambda x: len(set(x.lower().split())) / (len(x.split()) + 1)
     )
     X["AvgWordLength"] = text_col.apply(
         lambda x: np.mean([len(w) for w in x.split()]) if x.split() else 0
     )
+
+    # Negation and extreme-sentiment word counts
+    X["NegationCount"]  = text_col.apply(
+        lambda x: sum(1 for w in x.lower().split() if w.rstrip(".,!?;:") in _NEGATION_WORDS)
+    )
+    X["ExtremePosCount"] = text_col.apply(
+        lambda x: sum(1 for w in x.lower().split() if w.rstrip(".,!?;:") in _EXTREME_POS_WORDS)
+    )
+    X["ExtremeNegCount"] = text_col.apply(
+        lambda x: sum(1 for w in x.lower().split() if w.rstrip(".,!?;:") in _EXTREME_NEG_WORDS)
+    )
+    # Net extreme sentiment balance (positive - negative extreme words)
+    X["ExtremeBalance"] = X["ExtremePosCount"] - X["ExtremeNegCount"]
 
     # Sentence-level features
     X["SentenceCount"] = text_col.apply(

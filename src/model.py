@@ -9,7 +9,7 @@ from sklearn.metrics import mean_squared_error
 
 
 def train_ridge(X_train, y_train, alpha=10.0):
-    """Fit a Ridge regression on (X_train, y_train) and return the model."""
+    # Fit a Ridge regression on (X_train, y_train) and return the model.
     model = Ridge(alpha=alpha)
     model.fit(X_train, y_train)
     return model
@@ -21,7 +21,7 @@ def train_extra_trees(X_train, y_train,
     """
     ExtraTreesRegressor on dense features (LSA + numeric + sentiment + LOO bias).
     Extremely Randomized Trees: uses random splits (not best splits) so it is
-    faster and more regularized than Random Forest. Not a boosting method.
+    faster and more regularized than Random Forest. Works well with noisy features and can capture non-linear relationships.
     """
     model = ExtraTreesRegressor(
         n_estimators=n_estimators,
