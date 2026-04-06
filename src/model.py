@@ -1,7 +1,6 @@
 import pickle
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import ExtraTreesRegressor
@@ -10,6 +9,7 @@ from sklearn.metrics import mean_squared_error
 
 
 def train_ridge(X_train, y_train, alpha=10.0):
+    """Fit a Ridge regression on (X_train, y_train) and return the model."""
     model = Ridge(alpha=alpha)
     model.fit(X_train, y_train)
     return model
@@ -35,6 +35,7 @@ def train_extra_trees(X_train, y_train,
 
 
 def train_linear_svr(X_train, y_train, C=0.1, max_iter=2000):
+    # dual=True is valid when n_samples < n_features (sparse TF-IDF); flip to False for dense input
     model = LinearSVR(C=C, max_iter=max_iter, dual=True)
     model.fit(X_train, y_train)
     return model
@@ -72,6 +73,9 @@ def create_submission(
     clip_range=(1, 5),
     round_predictions=False
 ):
+    # NOTE: for the two-stage residual pipeline, add the bias baseline to
+    # model.predict(X_test) *before* calling this function, or compute
+    # final_preds manually and write the CSV directly.
     predictions = model.predict(X_test)
 
     if clip_range is not None:

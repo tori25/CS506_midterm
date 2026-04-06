@@ -9,16 +9,10 @@ Predict the star rating (1–5) of Amazon Movie Reviews. Metric: **RMSE** (lower
 ## How to run
 
 ```bash
-pip install -r requirements.txt
-jupyter notebook notebooks/modeling.ipynb
-```
-
-Or with make:
-
-```bash
-make run    # modeling notebook
-make eda    # EDA notebook
-make all    # everything
+make install   # pip install -r requirements.txt
+make run       # execute modeling notebook
+make eda       # execute EDA notebook
+make all       # eda + run
 ```
 
 ---
@@ -58,11 +52,11 @@ This captures the fact that some users always give 5 stars and some products alw
 ```
 residual = score - baseline
 ```
-Ridge and LightGBM are both trained to predict the residual — how much the text pushes the score above or below what the user/product bias predicts.
+Ridge and ExtraTrees are both trained to predict the residual — how much the text pushes the score above or below what the user/product bias predicts.
 
 **Final prediction:**
 ```
-prediction = clip(baseline + Ridge_weight * ridge_residual + LightGBM_weight * lgbm_residual, 1, 5)
+prediction = clip(baseline + Ridge_weight * ridge_residual + ExtraTrees_weight * et_residual, 1, 5)
 ```
 
 This is better than the all-in-one approach because the text model can focus purely on the content signal without having to also learn the user/product patterns.
@@ -90,14 +84,10 @@ The blend weight was picked by sweeping Ridge 50%→95% on the validation set.
 - `baseline = clip(user_smoothed + product_smoothed - global_mean, 1, 5)`
 - Unknown users/products fall back to global mean
 
-**Bias features for LightGBM (residual correction signals):**
+**Bias features for ExtraTrees (residual correction signals):**
 - Leave-one-out smoothed means — each sample's user/product mean computed without that sample's score
 - `user_score_std`, `product_score_std` — rating consistency of user/product
 - User and product review counts
-
-**Sentiment (VADER):**
-- Compound, positive, negative scores on both Summary and Text
-- Rule-based, no fitting needed — no leakage risk
 
 **Sentiment (VADER):**
 - Compound, positive, negative scores on both Summary and Text
@@ -158,12 +148,13 @@ CS506_midterm/
 ├── src/
 │   ├── data.py             # loading data
 │   ├── features.py         # TF-IDF, char n-grams, bias, baseline, sentiment, numeric
-│   └── model.py            # Ridge, LightGBM, eval, submission
+│   └── model.py            # Ridge, ExtraTrees, LinearSVR, eval, submission
 ├── submissions/
 │   ├── submission.csv             # Ridge two-stage only
 │   └── submission_ensemble.csv   # best — Ridge + ExtraTrees ensemble
 ├── assets/
-│   └── predicted_score_dist.png
+│   ├── predicted_score_dist.png
+│   └── ridge_alpha_tuning.png
 ├── requirements.txt
 └── Makefile
 ```

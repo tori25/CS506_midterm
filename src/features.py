@@ -188,6 +188,7 @@ def build_baseline(train_labeled, all_data, shrinkage=10):
 
 
 def build_numeric_features(df):
+    """Extract hand-crafted numeric features: helpfulness ratios, text lengths, punctuation, and time."""
     X = pd.DataFrame(index=df.index)
 
     X["HelpfulnessRatio"] = (
@@ -234,6 +235,14 @@ def build_numeric_features(df):
 
 
 def prepare_training_data(training_df, text_column="Text", max_features=30000, ngram_range=(1, 2)):
+    """
+    Fit all transformers on the labeled rows and return a 10-tuple:
+    (X_sparse, y_residual, baseline, tfidf_summary, tfidf_text,
+     tfidf_char, tfidf_char_summary, svd, numeric_columns, labeled_df)
+
+    y_residual = score - bias_baseline so that Ridge/ExtraTrees learn
+    only the part the baseline cannot explain.
+    """
     # Labeled = has Score; unlabeled = test set
     labeled = training_df.dropna(subset=["Score"]).copy()
 
@@ -308,6 +317,11 @@ def prepare_training_data(training_df, text_column="Text", max_features=30000, n
 
 def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, tfidf_char_summary,
                       svd, numeric_columns, labeled_df):
+    """
+    Apply fitted transformers from prepare_training_data() to the test set.
+    Returns (X_test, baseline_test); caller reconstructs final score as
+    clip(baseline_test + model.predict(X_test), 1, 5).
+    """
     # Bias baseline for final prediction reconstruction
     baseline_test = build_baseline(labeled_df, test_df)
 
@@ -324,6 +338,7 @@ def prepare_test_data(test_df, tfidf_summary, tfidf_text, tfidf_char, tfidf_char
     X_text = hstack([X_summary, X_text_body, X_char, X_char_summary])
 
     X_lsa = svd.transform(X_text)
+    # Normalizer has no fitted state (row-wise L2 norm), so fit_transform == transform here
     X_lsa = Normalizer(copy=False).fit_transform(X_lsa)
 
     X_num_sparse = csr_matrix(num_feats.values)
